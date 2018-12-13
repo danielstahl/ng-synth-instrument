@@ -31,7 +31,6 @@ const keyboardShortcuts = KeyboardShortcuts.create({
             if(firstInput) {
               firstInput.onmidimessage = (event) => this.midiEvent(event)
             }
-    
           },
           (err) => {
             console.log("We did not get MIDI", err)
