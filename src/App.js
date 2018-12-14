@@ -60,13 +60,33 @@ class App extends Component {
     return min + scale * (position-minp)
   }
 
+  makeModulator(startTime, midiNumber, range, oscType, amount, modWheel, attack) {
+    const audioContext = this.state.audioContext
+    const modulatorRatio =  this.getRangeValue(range)
+    const modulator = audioContext.createOscillator()
+    modulator.type = oscType
+    modulator.frequency.value = Utils.toFreq(midiNumber) * modulatorRatio
+
+    const modulatorAmount = 3000 * (amount / 127) * (modWheel / 127)
+
+    const attackTime = this.rescaleExp(attack, 0.001, 5)
+    const modulatorGain = audioContext.createGain()
+    modulatorGain.gain.value = 300
+    modulatorGain.gain.exponentialRampToValueAtTime(modulatorAmount, startTime + attackTime)
+    modulator.connect(modulatorGain)
+
+    return {
+      modulatorOsc: modulator,
+      modulatorGain: modulatorGain
+    }
+  }
+
   noteOn(midiNumber, velocity) {
     const audioContext = this.state.audioContext
     const startTime = audioContext.currentTime
 
     const env = audioContext.createGain()
     const attackTime = this.rescaleExp(this.state.attackKnob, 0.001, 5)
-    console.log("attackTime", attackTime)
     
     const sustainTime = attackTime * 2
     const attackVolume = velocity / 127 / 2
@@ -78,66 +98,65 @@ class App extends Component {
     env.gain.exponentialRampToValueAtTime(attackVolume, startTime + attackTime)
     env.gain.exponentialRampToValueAtTime(sustainVolume, startTime + sustainTime)
 
-    const modulatorRatio = this.getRangeValue(this.state.modRange1Knob)
-    const modulatorRatio2 = this.getRangeValue(this.state.modRange2Knob)
+    const mod1setup = this.makeModulator(
+      startTime, 
+      midiNumber, 
+      this.state.modRange1Knob, 
+      this.state.modulator1Type, 
+      this.state.modAmount1Knob, 
+      this.state.modWheel, 
+      this.state.modAttack1Knob)
 
-    const modulator = audioContext.createOscillator()
-    modulator.type = this.state.modulator1Type
-    modulator.frequency.value = Utils.toFreq(midiNumber) * modulatorRatio
-
-    const modulator2 = audioContext.createOscillator()
-    modulator2.type = this.state.modulator2Type
-    modulator2.frequency.value = Utils.toFreq(midiNumber) * modulatorRatio2
+      const mod2setup = this.makeModulator(
+        startTime, 
+        midiNumber, 
+        this.state.modRange2Knob, 
+        this.state.modulator2Type, 
+        this.state.modAmount2Knob, 
+        this.state.modWheel, 
+        this.state.modAttack2Knob)  
 
     const carrier = audioContext.createOscillator()
     carrier.type = this.state.carrierType
 
     carrier.frequency.value = Utils.toFreq(midiNumber)
 
-    const modulatorAmount = 3000 * (this.state.modAmount1Knob / 127) * (this.state.modWheel / 127)
-    console.log("Mod amount", modulatorAmount)
+    mod1setup.modulatorGain.connect(carrier.frequency)
+    mod1setup.modulatorOsc.connect(env)
 
-    const modulator1attackTime = this.rescaleExp(this.state.modAttack1Knob, 0.001, 5)
-    const modulatorGain = audioContext.createGain()
-    modulatorGain.gain.value = 300
-    modulatorGain.gain.exponentialRampToValueAtTime(modulatorAmount, startTime + modulator1attackTime)
+    mod2setup.modulatorGain.connect(carrier.frequency)
+    mod2setup.modulatorOsc.connect(env)
 
-    modulator.connect(modulatorGain)
-    modulatorGain.connect(carrier.frequency)
-    
-    modulator.connect(env)
-
-    const modulatorAmount2 = 3000 * (this.state.modAmount2Knob / 127) * (this.state.modWheel / 127)
-    console.log("Mod amount2", modulatorAmount2)
-
-    const modulator2attackTime = this.rescaleExp(this.state.modAttack2Knob, 0.001, 5)
-    const modulatorGain2 = audioContext.createGain()
-    
-    modulatorGain2.gain.value = 300
-    modulatorGain2.gain.exponentialRampToValueAtTime(modulatorAmount2, startTime + modulator2attackTime)
-
-
-    modulator2.connect(modulatorGain2)
-    modulatorGain2.connect(carrier.frequency)
-
-    modulator2.connect(env)
     carrier.connect(env)
 
-    modulator.start(startTime)
-    modulator2.start(startTime)
+    mod1setup.modulatorOsc.start(startTime)
+
+    mod2setup.modulatorOsc.start(startTime)
     carrier.start(startTime)
 
     this.state.currentNotes.set(midiNumber, {
       env: env,
       carrier: carrier,
-      modulator: modulator,
-      modulator2: modulator2,
-      modulatorGain: modulatorGain,
-      modulatorGain2: modulatorGain2
+      modulator: mod1setup.modulatorOsc,
+      modulator2: mod2setup.modulatorOsc,
+      modulatorGain: mod1setup.modulatorGain,
+      modulatorGain2: mod2setup.modulatorGain
     })
     this.setState({
         currentNotes: this.state.currentNotes
     })
+  }
+
+  teardownModulator(modulatorOsc, modulatorGain, endTime, attack) {
+    const audioContext = this.state.audioContext
+    const releaseTime = this.rescaleLin(attack, 0.6, 1)
+    modulatorGain.gain.cancelAndHoldAtTime(audioContext.currentTime)
+    modulatorGain.gain.setTargetAtTime(300, audioContext.currentTime + 0.01, releaseTime)
+    modulatorOsc.stop(endTime + (releaseTime * 5))
+    modulatorOsc.onended = () => {
+      modulatorOsc.disconnect()
+      modulatorGain.disconnect()
+    }
   }
 
   noteOff(midiNumber) {
@@ -147,38 +166,21 @@ class App extends Component {
     const currentNote = this.state.currentNotes.get(midiNumber)
     const carrier = currentNote.carrier
     const env = currentNote.env
-    const modulator = currentNote.modulator
-    const modulator2 = currentNote.modulator2
-    const modulatorGain = currentNote.modulatorGain
-    const modulatorGain2 = currentNote.modulatorGain2
+    
+    this.teardownModulator(currentNote.modulator, currentNote.modulatorGain, endTime, this.state.modAttack1Knob)
+    this.teardownModulator(currentNote.modulator2, currentNote.modulatorGain2, endTime, this.state.modAttack2Knob)
 
     const releaseTime = this.rescaleLin(this.state.attackKnob, 0.1, 1)
     console.log("release time", releaseTime)
     env.gain.cancelAndHoldAtTime(audioContext.currentTime)
     env.gain.setTargetAtTime(0, audioContext.currentTime + 0.01, releaseTime)
 
-    const modulator1releaseTime = this.rescaleLin(this.state.modAttack1Knob, 0.6, 1)
-    modulatorGain.gain.cancelAndHoldAtTime(audioContext.currentTime)
-    modulatorGain.gain.setTargetAtTime(300, audioContext.currentTime + 0.01, modulator1releaseTime)
-    
-    const modulator2releaseTime = this.rescaleLin(this.state.modAttack2Knob, 0.6, 1)
-    modulatorGain2.gain.cancelAndHoldAtTime(audioContext.currentTime)
-    modulatorGain2.gain.setTargetAtTime(300, audioContext.currentTime + 0.01, modulator2releaseTime)
-
     carrier.stop(endTime + (releaseTime * 5))
     carrier.onended = () => {
       carrier.disconnect()
+      env.disconnect()
     }
 
-    modulator.stop(endTime + (releaseTime * 5))
-    modulator2.stop(endTime + (releaseTime * 5))
-    modulator.onended = () => {
-      modulator.disconnect()
-      modulator2.disconnect()
-      env.disconnect()
-      modulatorGain.disconnect()
-      modulatorGain2.disconnect()
-    }
     this.state.currentNotes.delete(midiNumber)
     this.setState({
         currentNotes: this.state.currentNotes
